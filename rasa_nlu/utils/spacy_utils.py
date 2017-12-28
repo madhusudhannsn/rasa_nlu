@@ -11,6 +11,7 @@ from typing import Dict
 from typing import List
 from typing import Optional
 from typing import Text
+import numpy as np
 
 from rasa_nlu.components import Component
 from rasa_nlu.config import RasaNLUConfig
@@ -50,6 +51,9 @@ class SpacyNLP(Component):
             spacy_model_name = config["language"]
         logger.info("Trying to load spacy model with name '{}'".format(spacy_model_name))
         nlp = spacy.load(spacy_model_name, parser=False)
+        n_vectors = 600000
+        print("Pruning the vectors to get space for custom vectors. This process takes about 5 minutes.")
+        nlp.vocab.prune_vectors(n_vectors)
         cls.ensure_proper_language_model(nlp)
         return SpacyNLP(nlp, config["language"], spacy_model_name)
 
@@ -70,14 +74,48 @@ class SpacyNLP(Component):
 
     def train(self, training_data, config, **kwargs):
         # type: (TrainingData) -> Dict[Text, Any]
-
         for example in training_data.training_examples:
-            example.set("spacy_doc", self.nlp(example.text.lower()))
+            doc = self.nlp(example.text.strip().lower())
+            example.set("spacy_doc", doc)
+        SpacyNLP.nlp = self.nlp
+
+    def add_oov_words(self,doc):
+        counter = 0
+        for token in doc:
+            if token.text != ' ' and not token.has_vector:
+                self.nlp_update_vector(token.text, np.random.uniform(-1, 1, (300,)))
+                print(token.text)
+                counter = counter + 1
+        return counter
+
+    @classmethod
+    def nlp_update_vector(cls,key,vector):
+        if not cls.nlp.vocab.vectors.is_full:
+            cls.nlp.vocab.vectors.add(key,vector=vector)
+        else:
+            pass
+            # print("Not able to add out of vocabulary words as vector table is full")
+
+    @classmethod
+    def get_processed_text_vectors(cls,text):
+        doc = cls.nlp(text)
+        filter_types = ['PUNCT', 'DET', 'CCONJ', 'SPACE']
+        valid_tokens = []
+        for token in doc:
+            if token.text.startswith('^'):
+                valid_tokens.append(token.text)
+            elif token.pos_ not in filter_types:
+                valid_tokens.append(token.lemma_)
+            if token.text != ' ' and not token.has_vector:
+                cls.nlp_update_vector(token.text, np.random.uniform(-1, 1, (300,)))
+        processed_text = ' '.join(valid_tokens)
+        print("Processed doc : "+processed_text)
+        return cls.nlp(processed_text).vector
 
     def process(self, message, **kwargs):
         # type: (Message, **Any) -> None
-
-        message.set("spacy_doc", self.nlp(message.text.lower()))
+        doc = self.nlp(message.text.strip().lower())
+        message.set("spacy_doc", doc)
 
     def persist(self, model_dir):
         # type: (Text) -> Dict[Text, Any]
@@ -94,9 +132,10 @@ class SpacyNLP(Component):
 
         if cached_component:
             return cached_component
-
         nlp = spacy.load(model_metadata.get("spacy_model_name"), parser=False)
         cls.ensure_proper_language_model(nlp)
+        nlp.vocab.vectors.from_disk('./word_vectors')
+        SpacyNLP.nlp = nlp
         return SpacyNLP(nlp, model_metadata.get("language"), model_metadata.get("spacy_model_name"))
 
     @staticmethod

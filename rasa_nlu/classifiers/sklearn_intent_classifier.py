@@ -8,6 +8,7 @@ import typing
 from builtins import zip
 import os
 import io
+import re
 from future.utils import PY3
 from typing import Any, Optional
 from typing import Dict
@@ -20,6 +21,7 @@ from rasa_nlu.config import RasaNLUConfig
 from rasa_nlu.model import Metadata
 from rasa_nlu.training_data import Message
 from rasa_nlu.training_data import TrainingData
+from rasa_nlu.utils.spacy_utils import SpacyNLP
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +85,7 @@ class SklearnIntentClassifier(Component):
         from sklearn.model_selection import GridSearchCV
         from sklearn.svm import SVC
         import numpy as np
+        from sklearn.model_selection import train_test_split
 
         labels = [e.get("intent") for e in training_data.intent_examples]
 
@@ -91,8 +94,8 @@ class SklearnIntentClassifier(Component):
                         "Skipping training of intent classifier.")
         else:
             y = self.transform_labels_str2num(labels)
-            X = np.stack([example.get("text_features") for example in training_data.intent_examples])
-
+            X = np.stack(self.get_processed_vectors(training_data,True))
+            # X = np.stack([example.get("text_features") for example in training_data.intent_examples])
             sklearn_config = config.get("intent_classifier_sklearn")
             C = sklearn_config.get("C", [1, 2, 5, 10, 20, 100])
             kernel = sklearn_config.get("kernel", "linear")
@@ -104,18 +107,60 @@ class SklearnIntentClassifier(Component):
                                     param_grid=tuned_parameters, n_jobs=config["num_threads"],
                                     cv=cv_splits, scoring='f1_weighted', verbose=1)
 
-            self.clf.fit(X, y)
+            features_train, features_test, labels_train, labels_test = train_test_split(X, y, test_size=0.2,
+                                                                                        random_state=50)
+            self.clf.fit(features_train, labels_train)
+            print("Accuracy on validation data with 20% split: " + str(self.clf.score(features_test, labels_test)))
+
+    def get_processed_vectors(self,data,train_flag):
+        output = []
+        if train_flag:
+            for example in data.entity_examples:
+                text = example.get('spacy_doc').text
+                print("Original Text : "+text)
+                entities = example.get('entities')
+                entity_replace_list = []
+                for entity in entities:
+                    entity_name = "^" + entity['entity']
+                    entity_replace_list.append({
+                        text[entity["start"]:entity["end"]] : entity_name
+                    })
+                text = self.replaceEntities(text,entity_replace_list)
+                vector = SpacyNLP.get_processed_text_vectors(text)
+                output.append(vector)
+            SpacyNLP.nlp.vocab.vectors.to_disk('./word_vectors')
+        else:
+            entities = data.get('entities')
+            text = data.get('spacy_doc').text
+            print("Original Text : " + text)
+            entity_replace_list = []
+            for entity in entities:
+                entity_name = "^" + entity['entity']
+                entity_replace_list.append({
+                    text[entity["start"]:entity["end"]]: entity_name
+                })
+            text = self.replaceEntities(text, entity_replace_list)
+            vector = SpacyNLP.get_processed_text_vectors(text)
+            output.append(vector)
+        return output
+
+    def replaceEntities(self,text,entity_list):
+        for item in entity_list:
+            text = re.sub(r'\b' + item.keys()[0] + r'\b', item.values()[0], text)
+        return text
 
     def process(self, message, **kwargs):
         # type: (Message, **Any) -> None
         """Returns the most likely intent and its probability for the input text."""
-
+        import numpy as np
         if not self.clf:
             # component is either not trained or didn't receive enough training data
             intent = None
             intent_ranking = []
         else:
+
             X = message.get("text_features").reshape(1, -1)
+            X = np.array(self.get_processed_vectors(message,False)).reshape(1, -1)
             intent_ids, probabilities = self.predict(X)
             intents = self.transform_labels_num2str(intent_ids)
             # `predict` returns a matrix as it is supposed

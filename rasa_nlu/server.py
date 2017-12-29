@@ -222,6 +222,9 @@ class RasaNLU(object):
 if __name__ == '__main__':
     # Running as standalone python application
     arg_parser = create_argparser()
+    import spacy
+    from rasa_nlu.extractors.spacy_entity_extractor import SpacyEntityExtractor
+    SpacyEntityExtractor.nlp = spacy.load('../trained_nlp_model')
     cmdline_args = {key: val
                     for key, val in list(vars(arg_parser.parse_args()).items())
                     if val is not None}
